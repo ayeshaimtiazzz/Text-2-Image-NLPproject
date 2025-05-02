@@ -1,19 +1,14 @@
 syntax = "proto3";
 
-package text2image;
-
-// Define the request message for text input and context
-message TextRequest {
-  string text = 1;   // The storyline or description
-  string context = 2; // Additional context for generating an image
+service Text2ImageService {
+  rpc GenerateImage (TextPrompt) returns (ImageResponse);
 }
 
-// Define the response message for the generated image (for simplicity, we return a URL here)
-message TextResponse {
-  string image_url = 1; // URL of the generated image
+message TextPrompt {
+  string prompt = 1;
 }
 
-// Define the TextToImage service with a method to generate an image from text
-service TextToImageService {
-  rpc GenerateImage (TextRequest) returns (TextResponse);
+message ImageResponse {
+  string corrected_prompt = 1;
+  string image_base64 = 2; // Base64-encoded image string for frontend compatibility
 }

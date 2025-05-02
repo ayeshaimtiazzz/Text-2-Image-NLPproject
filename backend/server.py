@@ -1,33 +1,68 @@
 import grpc
-from concurrent import futures
-import time
+import io
+import torch
+import asyncio
+import base64
+from PIL import Image, ImageFilter
+from textblob import TextBlob
+
 import text2image_pb2
 import text2image_pb2_grpc
 
-class TextToImageServiceServicer(text2image_pb2_grpc.TextToImageServiceServicer):
-    def GenerateImage(self, request, context):
-        # Here, the request will be a TextRequest message, so you can access `request.text` and `request.context`
-        print(f"Received request: {request.text} with context: {request.context}")
-        
-        # Here, we simulate generating an image URL
-        image_url = f"https://example.com/generated_image?text={request.text}&context={request.context}"
+from diffusers import DiffusionPipeline
 
-        # Return the response with the generated image URL
-        return text2image_pb2.TextResponse(image_url=image_url)
+class Text2ImageServicer(text2image_pb2_grpc.Text2ImageServiceServicer):
+    def __init__(self):
+        self.pipe = DiffusionPipeline.from_pretrained(
+            "stabilityai/sd-turbo",
+            torch_dtype=torch.float32,
+            safety_checker=None,
+            requires_safety_checker=False
+        )
+        self.pipe.to("cpu")
 
-def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    text2image_pb2_grpc.add_TextToImageServiceServicer_to_server(TextToImageServiceServicer(), server)
-    server.add_insecure_port('[::]:50052')
-    print("Server started at port 50052...")
-    server.start()
-    try:
-        while True:
-            time.sleep(60 * 60 * 24)
-    except KeyboardInterrupt:
-        server.stop(0)
+    async def GenerateImage(self, request, context):
+        try:
+            prompt = request.prompt.strip()
 
-if __name__ == '__main__':
-    serve()
+            if not prompt:
+                raise ValueError("Prompt cannot be empty.")
+
+            corrected_prompt = str(TextBlob(prompt).correct())
+            print(f"[SERVER] Corrected prompt: {corrected_prompt}")
+
+            def generate_image():
+                with torch.no_grad():
+                    image = self.pipe(corrected_prompt, num_inference_steps=5, guidance_scale=5.0).images[0]
+                    image = image.resize((384, 384))
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+            image_base64 = await asyncio.to_thread(generate_image)
+
+            return text2image_pb2.ImageResponse(
+                corrected_prompt=corrected_prompt,
+                image_base64=image_base64
+            )
+
+        except ValueError as ve:
+            print(f"[SERVER WARNING] {ve}")
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(ve))
+
+        except Exception as e:
+            print(f"[SERVER ERROR] {e}")
+            await context.abort(grpc.StatusCode.UNKNOWN, f"Server error: {str(e)}")
 
 
+# Async gRPC server startup
+async def serve():
+    server = grpc.aio.server()
+    text2image_pb2_grpc.add_Text2ImageServiceServicer_to_server(Text2ImageServicer(), server)
+    server.add_insecure_port('[::]:50051')
+    await server.start()
+    print("Async gRPC server running on port 50051...")
+    await server.wait_for_termination()
+
+if __name__ == "__main__":
+    asyncio.run(serve())
